@@ -1,5 +1,11 @@
 import os
 import sys
+
+# Prevent OpenBLAS memory allocation retries and cap thread count
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["MKL_NUM_THREADS"] = "4"
+
 import time
 import gc
 import subprocess
@@ -10,7 +16,7 @@ import polars as pl
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.append(os.path.dirname(__file__))
 
-from utils import clean_text, compute_macro_f05
+from utils import clean_text, clean_text_list, compute_macro_f05
 from blocking import MultiPassBlocker
 from features import batch_extract_features
 from model import EntityMatchingModel
@@ -20,7 +26,8 @@ def run_end_to_end_pipeline(
     test_dir: str,
     output_dir: str,
     model_save_path: str = None,
-    sample_train_size: int = 40000
+    sample_train_size: int = 30000,
+    sample_pool_size: int = 250000
 ):
     print("==========================================================")
     print("  AMAZON ML CHALLENGE 2026 — BUSINESS ENTITY RESOLUTION  ")
@@ -41,19 +48,40 @@ def run_end_to_end_pipeline(
     gc.collect()
 
     gt_dict = {}
+    true_matched_ids = set()
     for _, row in gt_df.iterrows():
         m = row["matched_entity_ids"]
-        gt_dict[row["source1_entity_id"]] = set(m.split(",")) if isinstance(m, str) and m.strip() else set()
+        if isinstance(m, str) and m.strip():
+            m_set = set(m.split(","))
+            gt_dict[row["source1_entity_id"]] = m_set
+            true_matched_ids.update(m_set)
+        else:
+            gt_dict[row["source1_entity_id"]] = set()
 
     for s in s1_train_ids:
         if s not in gt_dict:
             gt_dict[s] = set()
 
-    s2_train_df = pd.read_csv(os.path.join(train_dir, "train_source2.tsv"), sep="\t", dtype=str)
-    s3_train_df = pd.read_csv(os.path.join(train_dir, "train_source3.tsv"), sep="\t", dtype=str)
+    print("Loading S2 and S3 Training Pool...")
+    s2_train_df = pd.read_csv(os.path.join(train_dir, "train_source2.tsv"), sep="\t", nrows=sample_pool_size, dtype=str)
+    s3_train_df = pd.read_csv(os.path.join(train_dir, "train_source3.tsv"), sep="\t", nrows=sample_pool_size, dtype=str)
+
+    # Ensure all ground-truth true matched entities are included in training pool
+    missing_matched_s2 = [m for m in true_matched_ids if m.startswith("S2-") and m not in set(s2_train_df["entity_id"])]
+    missing_matched_s3 = [m for m in true_matched_ids if m.startswith("S3-") and m not in set(s3_train_df["entity_id"])]
+
+    if missing_matched_s2:
+        extra_s2 = pd.read_csv(os.path.join(train_dir, "train_source2.tsv"), sep="\t", dtype=str)
+        extra_s2 = extra_s2[extra_s2["entity_id"].isin(set(missing_matched_s2))]
+        s2_train_df = pd.concat([s2_train_df, extra_s2], ignore_index=True)
+
+    if missing_matched_s3:
+        extra_s3 = pd.read_csv(os.path.join(train_dir, "train_source3.tsv"), sep="\t", dtype=str)
+        extra_s3 = extra_s3[extra_s3["entity_id"].isin(set(missing_matched_s3))]
+        s3_train_df = pd.concat([s3_train_df, extra_s3], ignore_index=True)
 
     print("[2/5] Running Multi-Pass Candidate Blocking on Training Set...")
-    blocker = MultiPassBlocker(top_k=25, min_tfidf_sim=0.15, batch_size=10000)
+    blocker = MultiPassBlocker(top_k=25, min_tfidf_sim=0.15, batch_size=1000)
     train_cands = blocker.run_blocking(s1_train_df, s2_train_df, s3_train_df)
 
     print("Extracting Training Pair Features...")
@@ -112,12 +140,10 @@ def run_end_to_end_pipeline(
 
         print(f"[{country}] S1 count: {len(c_s1_df):,}, S2 count: {len(c_s2_df):,}, S3 count: {len(c_s3_df):,}")
 
-        # Blocking for country
         c_cands = blocker.generate_candidates_for_country(c_s1_df, pd.concat([c_s2_df, c_s3_df], ignore_index=True))
         for s1_id, c_set in c_cands.items():
             candidate_pairs_dict[s1_id].update(c_set)
 
-        # Build local dicts
         c_s1_dict = c_s1_df.set_index("entity_id").to_dict("index")
         for k, v in c_s1_dict.items():
             v["clean_name"] = clean_text(v.get("business_name", ""))
@@ -135,7 +161,6 @@ def run_end_to_end_pipeline(
         c_pairs = [(s1_id, cid) for s1_id, c_set in c_cands.items() for cid in c_set]
         print(f"[{country}] Pairs to score: {len(c_pairs):,}")
 
-        # Extract features and predict
         chunk_size = 40000
         for start in range(0, len(c_pairs), chunk_size):
             end = min(start + chunk_size, len(c_pairs))
@@ -189,4 +214,4 @@ if __name__ == "__main__":
     ts_dir = os.path.join(base_dir, "datasets", "student_resource", "dataset", "test")
     out_dir = os.path.join(base_dir, "output")
 
-    run_end_to_end_pipeline(t_dir, ts_dir, out_dir, sample_train_size=30000)
+    run_end_to_end_pipeline(t_dir, ts_dir, out_dir, sample_train_size=30000, sample_pool_size=250000)

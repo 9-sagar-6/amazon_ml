@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 from sklearn.feature_extraction.text import TfidfVectorizer
-from utils import clean_text, extract_numbers
+from utils import clean_text, clean_text_list, extract_numbers
 
 class MultiPassBlocker:
     """
@@ -24,16 +24,19 @@ class MultiPassBlocker:
             return candidates_dict
 
         if "clean_combined" not in pool_df.columns:
-            pool_df["clean_name"] = pool_df["business_name"].fillna("").apply(clean_text)
-            pool_df["clean_address"] = pool_df["business_address"].fillna("").apply(clean_text)
-            pool_df["clean_combined"] = pool_df["clean_name"] + " " + pool_df["clean_address"]
+            clean_names = clean_text_list(pool_df["business_name"].to_list())
+            clean_addrs = clean_text_list(pool_df["business_address"].to_list())
+            pool_df["clean_name"] = clean_names
+            pool_df["clean_address"] = clean_addrs
+            pool_df["clean_combined"] = [f"{n} {a}" for n, a in zip(clean_names, clean_addrs)]
 
         if "clean_combined" not in s1_df.columns:
-            s1_df["clean_name"] = s1_df["business_name"].fillna("").apply(clean_text)
-            s1_df["clean_address"] = s1_df["business_address"].fillna("").apply(clean_text)
-            s1_df["clean_combined"] = s1_df["clean_name"] + " " + s1_df["clean_address"]
+            clean_names = clean_text_list(s1_df["business_name"].to_list())
+            clean_addrs = clean_text_list(s1_df["business_address"].to_list())
+            s1_df["clean_name"] = clean_names
+            s1_df["clean_address"] = clean_addrs
+            s1_df["clean_combined"] = [f"{n} {a}" for n, a in zip(clean_names, clean_addrs)]
 
-        # min_df=10 ensures non-zero sparsity is low and zero memory allocation errors occur
         vectorizer = TfidfVectorizer(
             analyzer='char_wb',
             ngram_range=(3, 3),
@@ -72,16 +75,14 @@ class MultiPassBlocker:
 
         # Pass 2: Numeric Token & Zipcode Inverted Index Blocking
         num_index = defaultdict(list)
-        for idx, row in pool_df.iterrows():
-            cand_id = row["entity_id"]
-            num_tokens = extract_numbers(row["clean_combined"])
+        for cand_id, combined in zip(pool_df["entity_id"].to_list(), pool_df["clean_combined"].to_list()):
+            num_tokens = extract_numbers(combined)
             for num in num_tokens:
                 if len(num) >= 4:
                     num_index[num].append(cand_id)
 
-        for idx, row in s1_df.iterrows():
-            s1_id = row["entity_id"]
-            nums = extract_numbers(row["clean_combined"])
+        for s1_id, combined in zip(s1_df["entity_id"].to_list(), s1_df["clean_combined"].to_list()):
+            nums = extract_numbers(combined)
             for num in nums:
                 if len(num) >= 4 and num in num_index:
                     for cand_id in num_index[num][:15]:
