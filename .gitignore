@@ -1,0 +1,13 @@
+# Ignore heavy raw dataset files
+datasets/
+datasets/*
+
+# Include submission outputs
+!output/matching_results.tsv
+!output/candidate_pairs.tsv
+
+# Ignore Python bytecode and virtual environment
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
